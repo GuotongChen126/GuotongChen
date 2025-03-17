@@ -1,0 +1,694 @@
+---
+title: "STA141A Project"
+author: "Guotong Chen 921284222"
+date: "3/17/2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(caret)  # For model training & evaluation
+library(randomForest)  # Random Forest model
+library(e1071)  # SVM
+library(nnet)  # Neural Network
+library(xgboost)  # XGBoost model
+library(MASS)  # LDA
+library(class)  # kNN
+library(rpart)  # Decision Tree
+knitr::opts_chunk$set(echo = TRUE)
+```
+------------------------------------------------------------------------
+
+## Abstract
+
+This project examines the relationship between neural activity, contrast levels, and decision success in mice performing a visual discrimination task. Employing spike train data, contrast differences, reaction times, and type of feedback, aim to build a model that correctly classifies decision success or failure. The dataset comprises 18 sessions of four mice with differences in brain regions, neural firing rates, and stimulus intensity. It compared various machine learning algorithms like Logistic Regression, Decision Tree, Random Forest, SVM, kNN, Neural Network, XGBoost, and LDA to establish the most appropriate approach. Results indicate that contrast differences, differences in neural spike activity and reaction time are good indicators of success on trials while other variables like brain region and fatigue are introducers of noise rather than accuracy.
+
+------------------------------------------------------------------------
+
+## Introduction
+
+This project investigates the impact of contrast levels, neural activity, and reaction time on the performance of decision-making in a visual task. We have 18 sessions of four mice with recorded spike activity, reaction times, contrast levels, and trial outcome (success/failure). Questions I would most like to examine are: What are the predictors of the feedback? Can the outcome of the trials be predicted from reaction time, neural activity, and contrast differences? The data include eight main variables where the contrast levels are a quantification of the stimulus strength and spike data are a quantification of the neural engagement. We would like to build a prediction model by machine learning to predict the trial outcome. Models of the Random Forest, SVM, and XGBoost type are cross-validated to get the best approach and avoid session-related biases.
+
+------------------------------------------------------------------------
+
+## Exploratory analysis
+
+### 1. Load all sessions data into a list
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('./Data/session',i,'.rds',sep=''))
+}
+```
+</details>
+
+### 2. Explore data structure
+
+#### -- Show overall variables
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+ls(session[[1]])
+```
+</details>
+
+##### There are 8 variables in total in 18 sessions. They are: "brain_area", "contrast_left", "contrast_right", "date_exp", "feedback_type", "mouse_name", "spks", "time".
+
+#### -- More detailed summary for 18 sessions
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+for(i in 1:18){
+  print(paste("Session:", i))
+  print("Mouse Name:")
+  print(session[[i]]$mouse_name)
+  print("Date Exp:")
+  print(session[[i]]$date_exp)
+  print("Brain Area Distribution:")
+  print(table(session[[i]]$brain_area))
+  print("Contrast Left Distribution:")
+  print(table(session[[i]]$contrast_left))
+  print("Contrast Right Distribution:")
+  print(table(session[[i]]$contrast_right))
+  print("Feedback Type Distribution:")
+  print(table(session[[i]]$feedback_type))
+  print("Spike Train Data - Total Trials:")
+  print(length(session[[i]]$spks))
+  print("Time Data - Total Trials:")
+  print(length(session[[i]]$time))
+  print("Session Summary:")
+  print(summary(session[[i]]))
+}
+```
+</details>
+
+##### 1. General Dataset Summary
+-- 4 different mice: Cori, Forssmann, Hench, Lederberg
+
+-- There are multiple sessions per mice, which means variability in their behavior.
+
+-- Sessions recorded from 2016-12-14 to 2017-12-11.
+
+##### 2. Brain Area Summary
+-- Brain area are involved vary across 18 sessions.
+
+-- Different brain areas dominate in different sessions, which means potential session-specific biases, so brain area should likely be excluded for prediction (see more detail in later plot).
+
+##### 3. Contrast Level Distributions
+-- Contrast Left: 0, 0.25, 0.5, 1
+
+-- Contrast Right: 0, 0.25, 0.5, 1
+
+-- Large contrast differences between left and right are likely to result in more successful trials.
+
+-- May including the "contrast difference" as a derived factor to improve the later model accuracy.
+
+##### 4. Feedback Type Distribution
+-- Binary outcomes (-1 = Failure, 1 = Success)
+
+-- Feedback type should be predictable.
+
+##### 5. Spike Data
+-- Each session has spike data for each trial.
+
+-- Detailed spks summary see below ".
+
+##### 6. Reaction Time
+-- Each session records trial-wise reaction times.
+
+-- Detailed time summary see below.
+
+##### Detailed spks summary for all sessions
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+# Initialize an empty list to store spks summaries for each session
+all_sessions_spks = list()
+
+# Loop through all 18 sessions
+for (i in 1:18) {
+  
+  # Load session data
+  session_data = session[[i]]
+  
+  # Detect number of trials dynamically
+  num_trials = length(session_data$spks)
+  #print(paste("Number of trials in session", i, ":", num_trials))
+  
+  # Initialize vectors to store summary statistics
+  total_spikes_per_trial = numeric(num_trials)
+  avg_spikes_per_trial = numeric(num_trials)
+  num_neurons_per_trial = numeric(num_trials)
+  num_time_bins_per_trial = numeric(num_trials)
+  
+  # Loop through all trials in the session
+  for (t in 1:num_trials) {
+    
+    # Ensure the spks data is a matrix before processing
+    if (is.matrix(session_data$spks[[t]])) {
+      
+      # Get matrix dimensions (neurons × time bins)
+      dims = dim(session_data$spks[[t]])
+      
+      # Store number of neurons and time bins
+      num_neurons_per_trial[t] = dims[1]  # Rows = number of neurons
+      num_time_bins_per_trial[t] = dims[2]  # Columns = number of time bins
+      
+      # Compute total and average spikes
+      total_spikes_per_trial[t] = sum(session_data$spks[[t]])
+      avg_spikes_per_trial[t] = mean(rowSums(session_data$spks[[t]]))
+      
+    } else {
+      # If spks is not a matrix (shouldn't happen), set to NA
+      total_spikes_per_trial[t] = NA
+      avg_spikes_per_trial[t] = NA
+      num_neurons_per_trial[t] = NA
+      num_time_bins_per_trial[t] = NA
+    }
+  }
+  
+  # Create a summary data frame for the session
+  session_summary = data.frame(
+    session = rep(i, num_trials),
+    trial = 1:num_trials,
+    num_neurons = num_neurons_per_trial,
+    num_time_bins = num_time_bins_per_trial,
+    total_spikes = total_spikes_per_trial,
+    avg_spikes_per_neuron = avg_spikes_per_trial
+  )
+  
+  # Store session summary in the list
+  all_sessions_spks[[i]] = session_summary
+}
+
+# Combine all session summaries into a single data frame
+full_spks_summary = rbindlist(all_sessions_spks)
+
+# Print overall summary
+print(full_spks_summary)  # Show first few rows
+summary(full_spks_summary)  # Statistical summary of the full dataset
+```
+</details>
+
+##### Detailed time summary for all sessions
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+# Initialize an empty list to store time summaries for each session
+all_sessions_time = list()
+
+# Loop through all 18 sessions
+for (i in 1:18) {
+  
+  # Load session data
+  session_data = session[[i]]
+  
+  # Detect number of trials dynamically
+  num_trials = length(session_data$time)
+  #print(paste("Number of trials in session", i, ":", num_trials))
+  
+  # Initialize vectors to store summary statistics
+  total_time_points_per_trial = numeric(num_trials)
+  min_time_per_trial = numeric(num_trials)
+  max_time_per_trial = numeric(num_trials)
+  mean_time_per_trial = numeric(num_trials)
+  sd_time_per_trial = numeric(num_trials)
+  
+  # Loop through all trials in the session
+  for (t in 1:num_trials) {
+    
+    # Ensure the time data is a numeric vector before processing
+    if (is.numeric(session_data$time[[t]])) {
+      
+      # Store total number of time points
+      total_time_points_per_trial[t] = length(session_data$time[[t]])
+      
+      # Store min, max, mean, and standard deviation of time points
+      min_time_per_trial[t] = min(session_data$time[[t]])
+      max_time_per_trial[t] = max(session_data$time[[t]])
+      mean_time_per_trial[t] = mean(session_data$time[[t]])
+      sd_time_per_trial[t] = sd(session_data$time[[t]])
+      
+    } else {
+      # If time is not numeric (shouldn't happen), set to NA
+      total_time_points_per_trial[t] = NA
+      min_time_per_trial[t] = NA
+      max_time_per_trial[t] = NA
+      mean_time_per_trial[t] = NA
+      sd_time_per_trial[t] = NA
+    }
+  }
+  
+  # Create a summary data frame for the session
+  session_time_summary = data.frame(
+    session = rep(i, num_trials),
+    trial = 1:num_trials,
+    total_time_points = total_time_points_per_trial,
+    min_time = min_time_per_trial,
+    max_time = max_time_per_trial,
+    mean_time = mean_time_per_trial,
+    sd_time = sd_time_per_trial
+  )
+  
+  # Store session time summary in the list
+  all_sessions_time[[i]] = session_time_summary
+}
+
+# Combine all session time summaries into a single data frame
+full_time_summary = rbindlist(all_sessions_time)
+
+# Print overall summary
+print(full_time_summary)  # Show first few rows
+summary(full_time_summary)  # Statistical summary of the full dataset
+```
+</details>
+
+### 3. Data visualization
+
+#### Total Spikes Across Trials Plot
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+for (i in 1:18) {
+  
+  # Load session data
+  session_data = session[[i]]
+  
+  # Detect number of trials dynamically
+  num_trials = length(session_data$spks)
+  
+  # Extract total spikes per trial
+  total_spikes_per_trial = sapply(session_data$spks, function(x) if(is.matrix(x)) sum(x) else NA)
+  
+  # Create a data frame for this session
+  trial_spikes_df = data.frame(trial = 1:num_trials, total_spikes = total_spikes_per_trial)
+  
+  # Generate and print the plot for this session
+  plot = ggplot(trial_spikes_df, aes(x = trial, y = total_spikes)) +
+    geom_line(color = "blue", size = 1) +
+    geom_point(color = "red", size = 2, alpha = 0.7) +  # Highlight data points
+    labs(title = paste("Neural Activity: Total Spikes Across Trials (Session", i, ")"), 
+         x = "Trial", 
+         y = "Total Spikes") +
+    theme_minimal(base_size = 14) +  # Bigger font size for clarity
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16))  # Center & enlarge title
+  
+  print(plot)  # Display the plot
+}
+```
+</details>
+
+##### -- The plot shows that spikes vary across trials.
+##### -- Spikes fluctuate significantly within these sessions, which also means they could be a key predictor of the predictive model.
+-- Total Spikes measures overall neural activity during each trial in each session. A higher number of spikes may indicate to a higher engagement or stronger model fitting processes.
+
+-- Average Spikes are significant on normalizing activity per neuron, since some neurons are more active than others, so average spks can provide a more stable indicator of overall engagement, which also helps control for different neuron counts per trial (ensures the comparison across trials).
+
+##### -- Based on the negative slopes shown in the plots, the mice may tired over the trial (decreased neural activity) and the total peak were reduced over the trial.
+-- Therefore I considered add a fatigue factor to the model, to normalizes trial progression. 
+
+-- However, the correlation coefficient showed that fatigue_effect was weakly correlated with feedback_type (correlation close to 0), which means adding it may introduce noise rather than higher accuracy for model fitting, so I eventually excluded fatigue factor.
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+# Compute slope of total_spikes over trials for each session
+spike_trends_df <- full_spks_summary %>%
+  group_by(session) %>%
+  summarize(trend_slope = coef(lm(total_spikes ~ trial, data = cur_data()))[2])
+
+# Remove row names explicitly
+rownames(spike_trends_df) <- NULL
+
+# Print clean result
+print(spike_trends_df)
+
+# Compute fatigue_effect (trend_slope of total_spikes over trials)
+spike_trends_df <- full_spks_summary %>%
+  group_by(session) %>%
+  summarize(fatigue_effect = coef(lm(total_spikes ~ trial, data = cur_data()))[2])
+
+# Extract feedback_type for each session
+feedback_type_df <- data.frame(
+  session = 1:18,
+  feedback_type = sapply(session, function(x) as.numeric(x$feedback_type[1])) # Assuming feedback_type is categorical
+)
+
+# Merge datasets
+merged_df <- merge(spike_trends_df, feedback_type_df, by = "session")
+
+# Compute and print only the correlation coefficient
+correlation_value <- cor(merged_df$fatigue_effect, merged_df$feedback_type)
+print(correlation_value)
+```
+</details>
+
+
+#### Neuron Distribution Across Brain Areas Plot
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+for (i in 1:18) {
+  
+  # Load session data
+  session_data = session[[i]]
+  
+  # Extract brain area labels
+  brain_areas = session_data$brain_area
+  
+  # Count neurons per brain area
+  brain_area_counts = table(brain_areas)
+  
+  # Convert to data frame
+  brain_area_df = as.data.frame(brain_area_counts)
+  
+  # Generate plot
+  plot = ggplot(brain_area_df, aes(x = reorder(brain_areas, -Freq), y = Freq)) +
+    geom_bar(stat = "identity", fill = "purple") +
+    labs(title = paste("Neuron Distribution Across Brain Areas (Session", i, ")"),
+         x = "Brain Area", 
+         y = "Neuron Count") +
+    theme_minimal(base_size = 14) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  print(plot)
+}
+```
+</details>
+
+##### -- Reasons for exclude Brain Area in model
+1. Based on the plots, certain brain areas have significantly higher neuron counts than others in each session, which suggests an uneven representation that may introduce bias in the model.
+
+2. Some sessions show dominance by a single brain area, then the model may learn biased patterns that also lead to not able to generalize well.
+
+#### Reaction Time Distribution Plot 
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+for (i in 1:18) {
+  
+  # Load session data
+  session_data = session[[i]]
+  
+  # Ensure time data is available
+  if (!is.null(session_data$time)) {
+    
+    # Extract reaction time per trial
+    reaction_time = sapply(session_data$time, function(x) if(is.numeric(x)) max(x) - min(x) else NA)
+    
+    # Create data frame
+    reaction_time_df = data.frame(trial = 1:length(reaction_time), reaction_time = reaction_time)
+    
+    # Generate plot
+    plot = ggplot(reaction_time_df, aes(x = reaction_time)) +
+      geom_histogram(fill = "blue", bins = 20, alpha = 0.7) +
+      labs(title = paste("Reaction Time Distribution (Session", i, ")"), 
+           x = "Reaction Time (s)", 
+           y = "Frequency") +
+      theme_minimal(base_size = 14)
+    
+    print(plot)
+  }
+}
+```
+</details>
+
+##### -- Most reaction times cluster around a peak, but there are also some long reaction times exist.
+-- Mean reaction time measures reaction time speed, which can be differentiate between those confident and uncertain trials.
+
+-- Standard deviation of reaction time captures the consistency within trial to trial, which also helps assess cognitive stability.
+
+#### Feedback Type vs. Contrast Levels Scatter Plot
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+for (i in 1:18) {
+  
+  # Load session data
+  session_data = session[[i]]
+  
+  # Create data frame
+  feedback_df = data.frame(
+    contrast_left = session_data$contrast_left,
+    contrast_right = session_data$contrast_right,
+    feedback_type = factor(session_data$feedback_type, levels = c(-1,1), labels = c("Failure", "Success"))
+  )
+  
+  # Generate plot
+  plot = ggplot(feedback_df, aes(x = contrast_left, y = contrast_right, color = feedback_type)) +
+    geom_point(alpha = 0.6) +
+    labs(title = paste("Feedback Type vs. Contrast Levels (Session", i, ")"),
+         x = "Left Contrast",
+         y = "Right Contrast",
+         color = "Feedback Type") +
+    theme_minimal(base_size = 14)
+  
+  print(plot)
+}
+```
+</details>
+
+##### -- The plot shows a clear relationship between contrast values and feedback type.
+-- Trials with extreme contrast differences (high left contrast and low right contrast) tend to more correlated with "success" feedback.
+
+-- When both contrasts are similar, there are showed more "failure".
+
+-- Which means contrast levels strongly predict success, so they are important for my later  predictive modeling.
+
+------------------------------------------------------------------------
+
+## Data integration
+
+### Combine data from all 18 sessions
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+# Initialize an empty list to store processed session data
+all_sessions_data = list()
+
+# Loop through all 18 sessions
+for (i in 1:18) {
+  
+  # Load session data
+  session_data = session[[i]]
+  
+  # Detect number of trials dynamically
+  num_trials = length(session_data$feedback_type)
+  
+  # Create fatigue effect as normalized trial number (progression over session)
+  #fatigue_effect = (1:num_trials) / num_trials
+
+  # Extract and store relevant variables
+  df = data.frame(
+    session = rep(i, num_trials),
+    trial = 1:num_trials,
+    #fatigue_effect = fatigue_effect,  # New feature to capture fatigue
+    mouse_name = rep(as.character(session_data$mouse_name), num_trials),
+    date_exp = rep(as.character(session_data$date_exp), num_trials),
+    feedback_type = session_data$feedback_type,
+    contrast_left = session_data$contrast_left,
+    contrast_right = session_data$contrast_right
+  )
+  
+  # Extract spike train statistics
+  total_spikes = sapply(session_data$spks, function(x) if(is.matrix(x)) sum(x) else NA)
+  avg_spikes = sapply(session_data$spks, function(x) if(is.matrix(x)) mean(rowSums(x)) else NA)
+  num_neurons = sapply(session_data$spks, function(x) if(is.matrix(x)) dim(x)[1] else NA)
+  num_time_bins = sapply(session_data$spks, function(x) if(is.matrix(x)) dim(x)[2] else NA)
+  
+  df$total_spikes = total_spikes
+  df$avg_spikes = avg_spikes
+  df$num_neurons = num_neurons
+  df$num_time_bins = num_time_bins
+  
+  # Extract time statistics
+  total_time_points = sapply(session_data$time, function(x) if(is.numeric(x)) length(x) else NA)
+  min_time = sapply(session_data$time, function(x) if(is.numeric(x)) min(x) else NA)
+  max_time = sapply(session_data$time, function(x) if(is.numeric(x)) max(x) else NA)
+  mean_time = sapply(session_data$time, function(x) if(is.numeric(x)) mean(x) else NA)
+  sd_time = sapply(session_data$time, function(x) if(is.numeric(x)) sd(x) else NA)
+  
+  df$total_time_points = total_time_points
+  df$min_time = min_time
+  df$max_time = max_time
+  df$mean_time = mean_time
+  df$sd_time = sd_time
+  
+  # Store the processed session data
+  all_sessions_data[[i]] = df
+}
+
+# Combine all sessions into one integrated dataset
+full_dataset = rbindlist(all_sessions_data, use.names = TRUE, fill = TRUE)
+
+# Print and summarize
+print(full_dataset)
+#summary(full_dataset)
+```
+</details>
+
+------------------------------------------------------------------------
+
+## Predictive modeling
+
+### Model fitting prepare
+##### -- in the preparation I splitted dataset into training (95%) and testing (5%)
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+# Handle missing values by replacing with column mean
+for (col in names(full_dataset)) {
+  if (any(is.na(full_dataset[[col]]))) {
+    full_dataset[[col]][is.na(full_dataset[[col]])] = mean(full_dataset[[col]], na.rm = TRUE)
+  }
+}
+
+# Convert feedback_type to factor for classification
+full_dataset$feedback_type = as.factor(full_dataset$feedback_type)
+
+# Split dataset into training (95%) and testing (5%)
+set.seed(123)
+train_index = createDataPartition(full_dataset$feedback_type, p = 0.95, list = FALSE)
+train_data = full_dataset[train_index, ]
+test_data = full_dataset[-train_index, ]
+```
+</details>
+
+### Model fitting:
+##### -- Model I applied: Logistic Regression, Decision Tree, Random Forest, Support Vector Machine (SVM), k-Nearest Neighbors (kNN), Neural Network, Gradient Boosting (XGBoost), Linear Discriminant Analysis (LDA).
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+# Logistic Regression
+log_model = glm(feedback_type ~ contrast_left + contrast_right + total_spikes + avg_spikes + mean_time + sd_time, 
+                data = train_data, family = "binomial")
+log_pred = predict(log_model, test_data, type = "response")
+log_pred_class = ifelse(log_pred > 0.5, 1, -1)
+log_accuracy = mean(log_pred_class == test_data$feedback_type)
+
+## Decision Tree
+tree_model = rpart(feedback_type ~ contrast_left + contrast_right + total_spikes + avg_spikes + mean_time + sd_time, 
+                   data = train_data, method = "class")
+tree_pred = predict(tree_model, test_data, type = "class")
+tree_accuracy = mean(tree_pred == test_data$feedback_type)
+
+## Random Forest
+rf_model = randomForest(feedback_type ~ contrast_left + contrast_right + total_spikes + avg_spikes + mean_time + sd_time, 
+                        data = train_data, ntree = 100)
+rf_pred = predict(rf_model, test_data)
+rf_accuracy = mean(rf_pred == test_data$feedback_type)
+
+## Support Vector Machine (SVM)
+svm_model = svm(feedback_type ~ contrast_left + contrast_right + total_spikes + avg_spikes + mean_time + sd_time, 
+                data = train_data, kernel = "radial")
+svm_pred = predict(svm_model, test_data)
+svm_accuracy = mean(svm_pred == test_data$feedback_type)
+
+## k-Nearest Neighbors (kNN)
+knn_pred = knn(train = train_data[, c("contrast_left", "contrast_right", "total_spikes", "avg_spikes", "mean_time", "sd_time")], 
+               test = test_data[, c("contrast_left", "contrast_right", "total_spikes", "avg_spikes", "mean_time", "sd_time")], 
+               cl = train_data$feedback_type, k = 5)
+knn_accuracy = mean(knn_pred == test_data$feedback_type)
+
+## Neural Network
+nn_model = nnet(feedback_type ~ contrast_left + contrast_right + total_spikes + avg_spikes + mean_time + sd_time, 
+                data = train_data, size = 5, maxit = 200, trace = FALSE)
+nn_pred = predict(nn_model, test_data, type = "class")
+nn_accuracy = mean(nn_pred == test_data$feedback_type)
+
+## Gradient Boosting (XGBoost)
+xgb_train = xgb.DMatrix(data = as.matrix(train_data[, c("contrast_left", "contrast_right", "total_spikes", "avg_spikes", "mean_time", "sd_time")]), 
+                         label = as.numeric(train_data$feedback_type) - 1)
+xgb_test = xgb.DMatrix(data = as.matrix(test_data[, c("contrast_left", "contrast_right", "total_spikes", "avg_spikes", "mean_time", "sd_time")]), 
+                        label = as.numeric(test_data$feedback_type) - 1)
+xgb_model = xgboost(data = xgb_train, max_depth = 3, eta = 0.1, nrounds = 100, objective = "binary:logistic", verbose = 0)
+xgb_pred = predict(xgb_model, xgb_test)
+xgb_pred_class = ifelse(xgb_pred > 0.5, 1, -1)
+xgb_accuracy = mean(xgb_pred_class == test_data$feedback_type)
+
+## Linear Discriminant Analysis (LDA)
+train_data_nosd <- dplyr::select(train_data, -sd_time)
+test_data_nosd <- dplyr::select(test_data, -sd_time)
+lda_model <- lda(feedback_type ~ contrast_left + contrast_right + total_spikes + avg_spikes + mean_time, 
+                 data = train_data_nosd)
+lda_pred <- predict(lda_model, test_data_nosd)$class
+lda_accuracy <- mean(lda_pred == test_data_nosd$feedback_type)
+```
+</details>
+
+### Compare all models accuracy
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+accuracy_results = data.frame(
+  Model = c("Logistic Regression", "Decision Tree", "Random Forest", "SVM", "kNN", "Neural Network", "XGBoost"),
+  Accuracy = c(log_accuracy, tree_accuracy, rf_accuracy, svm_accuracy, knn_accuracy, nn_accuracy, xgb_accuracy)
+)
+
+# Print accuracy results
+print(accuracy_results)
+
+# Find the best model
+best_model = accuracy_results[which.max(accuracy_results$Accuracy), ]
+print(paste("Best Model:", best_model$Model, "with Accuracy:", best_model$Accuracy))
+```
+</details>
+
+------------------------------------------------------------------------
+
+# Prediction performance on the test sets
+<details>
+  <summary>Click to expand/hide code</summary>
+```{r}
+# Load the test data
+test1 = readRDS("./test/test1.rds")
+test2 = readRDS("./test/test2.rds")
+
+# Function to preprocess test data
+preprocess_test_data <- function(test_session) {
+  num_trials = length(test_session$feedback_type)
+  
+  # Create DataFrame
+  df = data.frame(
+    trial = 1:num_trials,
+    contrast_left = test_session$contrast_left,
+    contrast_right = test_session$contrast_right
+  )
+
+  # Extract spike statistics
+  df$total_spikes = sapply(test_session$spks, function(x) if(is.matrix(x)) sum(x) else NA)
+  df$avg_spikes = sapply(test_session$spks, function(x) if(is.matrix(x)) mean(rowSums(x)) else NA)
+  
+  # Extract time-related features
+  df$mean_time = sapply(test_session$time, function(x) if(is.numeric(x)) mean(x) else NA)
+  df$sd_time = sapply(test_session$time, function(x) if(is.numeric(x)) sd(x) else NA)
+  
+  return(df)
+}
+
+# Apply preprocessing
+test1_df = preprocess_test_data(test1)
+test2_df = preprocess_test_data(test2)
+
+# Random Forest
+rf_pred_test1 = predict(rf_model, test1_df)
+rf_pred_test2 = predict(rf_model, test2_df)
+
+rf_accuracy_test1 = mean(rf_pred_test1 == test1$feedback_type)
+rf_accuracy_test2 = mean(rf_pred_test2 == test2$feedback_type)
+
+print(paste("Random Forest - Test1 Accuracy:", rf_accuracy_test1))
+print(paste("Random Forest - Test2 Accuracy:", rf_accuracy_test2))
+```
+</details>
+
+------------------------------------------------------------------------
+
+# Discussion
+
+The research indicates that the best predictors of the prediction model are spikes of the neurons, contrast, and the response times. The higher the contrast difference is, the better the quality of the trials are, and the high levels of spikes indicate higher engagement. Fatigue effects were not highly relevant to performance and were eliminated. Brain region was also eliminated because of session variability. Random Forest worked best with the highest accuracy in the model fitting. Deep learning for increased accuracy is the lackness that needs to be improved. This preoject also illustrated how contrast level, neural activity, and reaction time determine the course of mice behavior.
+
+------------------------------------------------------------------------
